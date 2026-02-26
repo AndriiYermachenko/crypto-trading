@@ -1,0 +1,47 @@
+{
+  "timeframe": "1m",
+  "market": {
+    "type": "spot",
+    "symbol": "BTC/USDT",
+    "exchange": "binance"
+  },
+  "futures": {
+    "enabled": false,
+    "defaultLeverage": 3,
+    "marginMode": "isolated",
+    "maintenanceMarginRate": 0.005
+  },
+  "executionProfiles": {
+    "fees": {
+      "maker_taker_standard": {
+        "maker": 0.001,
+        "taker": 0.001
+      },
+      "vip_discount": {
+        "maker": 0.0006,
+        "taker": 0.0008
+      }
+    },
+    "slippage": {
+      "low_liquidity": {
+        "bps": 12
+      },
+      "medium_liquidity": {
+        "bps": 5
+      },
+      "high_liquidity": {
+        "bps": 2
+      }
+    },
+    "latency": {
+      "colocated": {
+        "orderAckMs": 5,
+        "marketDataDelayMs": 2
+      },
+      "retail_cloud": {
+        "orderAckMs": 80,
+        "marketDataDelayMs": 50
+      }
+    }
+  }
+}
