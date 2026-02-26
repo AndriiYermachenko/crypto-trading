@@ -10,7 +10,7 @@
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "jest --runInBand tests/unit",
     "test:integration": "jest --runInBand tests/integration",
-    "backtest": "node engine/backtest-cli.js",
+    "backtest": "node run_backtest.js",
     "lint": "echo 'No linter configured yet'",
     "report:example": "node reports/example-report.js"
   },
