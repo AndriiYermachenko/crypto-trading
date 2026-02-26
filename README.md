@@ -58,6 +58,12 @@ node run_backtest.js \
   --random-seed 42
 ```
 
+```bash
+node run_backtest.js
+```
+
+Команда выше запустит backtest на встроенном демо-наборе `examples/data/sample_candles.csv` и автоматически определит `--from/--to` по данным.
+
 ## Формат входных данных
 
 ### CSV
