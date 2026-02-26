@@ -91,7 +91,9 @@ class BacktestEngine {
       throw new Error('adapter.load(params) must return an array of events');
     }
 
-    return events.map((event) => normalizeEvent(event));
+    const normalized = events.map((event) => normalizeEvent(event));
+    warnOnCoarseCandleOnlyInput(normalized, params);
+    return normalized;
   }
 
   async run(params) {
@@ -502,6 +504,27 @@ function normalizeTimestamp(timestamp) {
   }
 
   return parsed;
+}
+
+
+function warnOnCoarseCandleOnlyInput(events, params) {
+  if (!Array.isArray(events) || events.length === 0) {
+    return;
+  }
+
+  const hasTicks = events.some((event) => event.type === 'tick');
+  const hasCandles = events.some((event) => event.type === 'candle');
+  if (hasTicks || !hasCandles) {
+    return;
+  }
+
+  if (params.timeframe !== '1m') {
+    return;
+  }
+
+  console.warn(
+    '[sanity-warning] Running backtest with only 1m candles. Partial fills and intrabar execution may be less accurate without tick-level data.',
+  );
 }
 
 function compareEvents(a, b) {
