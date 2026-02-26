@@ -1,0 +1,25 @@
+{
+  "name": "crypto-trading",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Crypto trading backtesting and execution framework",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "jest --runInBand tests/unit",
+    "test:integration": "jest --runInBand tests/integration",
+    "backtest": "node engine/backtest-cli.js",
+    "lint": "echo 'No linter configured yet'",
+    "report:example": "node reports/example-report.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "csv-writer": "^1.6.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}
