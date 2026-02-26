@@ -6,6 +6,16 @@ const path = require('path');
 const { BacktestEngine } = require('./engine');
 const { EmaCrossStrategy } = require('./strategies/ema_cross');
 
+const USAGE = [
+  'Usage:',
+  '  node run_backtest.js --strategy ema_cross --symbol BTC/USDT --from 2024-01-01 --to 2024-01-02 --tf 1m --data ./data/candles.csv',
+  '',
+  'Quick start (uses bundled sample candles):',
+  '  node run_backtest.js',
+  '',
+  'Tip: pass --help to see this message.',
+].join('\n');
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 2; i < argv.length; i += 1) {
@@ -105,10 +115,41 @@ function writeTradesCsv(filePath, trades) {
   fs.writeFileSync(filePath, `${lines.join('\n')}\n`, 'utf8');
 }
 
+function loadEvents(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  return filePath.endsWith('.json') ? JSON.parse(raw) : parseCsvCandles(raw);
+}
+
+function timestampToMs(value) {
+  if (typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    return Number(value);
+  }
+  return new Date(value).getTime();
+}
+
+function detectDateRange(events) {
+  const timestamps = events
+    .map((event) => timestampToMs(event.timestamp))
+    .filter((ts) => Number.isFinite(ts))
+    .sort((a, b) => a - b);
+
+  if (timestamps.length === 0) {
+    return null;
+  }
+
+  return {
+    fromIso: new Date(timestamps[0]).toISOString(),
+    toIso: new Date(timestamps[timestamps.length - 1]).toISOString(),
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help === 'true') {
-    console.log('Usage: node run_backtest.js --strategy ema_cross --symbol BTC/USDT --from 2024-01-01 --to 2024-01-02 --tf 1m --data ./data/candles.csv');
+    console.log(USAGE);
     process.exit(0);
   }
 
@@ -119,13 +160,29 @@ async function main() {
     throw new Error(`Unsupported strategy: ${strategyName}`);
   }
 
-  const dataPath = args.data;
-  if (!dataPath) {
-    throw new Error('--data is required (csv or json with candles)');
+  const bundledDataPath = path.join(__dirname, 'examples/data/sample_candles.csv');
+  const dataPath = args.data || bundledDataPath;
+
+  if (!fs.existsSync(dataPath)) {
+    throw new Error(`--data is required (csv or json with candles)\n\n${USAGE}`);
   }
 
-  const raw = fs.readFileSync(dataPath, 'utf8');
-  const events = dataPath.endsWith('.json') ? JSON.parse(raw) : parseCsvCandles(raw);
+  if (!args.data) {
+    console.log(`[INFO] --data not provided, using bundled sample: ${dataPath}`);
+  }
+
+  const events = loadEvents(dataPath);
+  if (events.length === 0) {
+    throw new Error(`No events loaded from: ${dataPath}`);
+  }
+
+  const detectedRange = detectDateRange(events);
+  const from = args.from || detectedRange?.fromIso;
+  const to = args.to || detectedRange?.toIso;
+
+  if (!from || !to) {
+    throw new Error(`Unable to infer --from/--to from dataset: ${dataPath}`);
+  }
 
   const strategy = new EmaCrossStrategy({
     short_period: toNumber(args.ema_short, 9),
@@ -148,8 +205,8 @@ async function main() {
     symbol: args.symbol || config.market.symbol,
     timeframe: args.tf || config.timeframe,
     market_type: args.market_type || config.market.type,
-    start_date: args.from,
-    end_date: args.to,
+    start_date: from,
+    end_date: to,
     initial_cash: toNumber(args.initial, 10000),
     random_seed: toNumber(args.random_seed, 1),
   });
@@ -157,8 +214,8 @@ async function main() {
   const summary = {
     symbol: args.symbol || config.market.symbol,
     timeframe: args.tf || config.timeframe,
-    from: args.from,
-    to: args.to,
+    from,
+    to,
     strategy: strategyName,
     trades: result.tradeLogs.filter((x) => x.type === 'order_filled').length,
     final_equity: result.finalState.equity,
