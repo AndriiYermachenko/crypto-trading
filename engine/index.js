@@ -1,5 +1,7 @@
 'use strict';
 
+const { calculateMarginSnapshot, calculateUnrealizedPnl } = require('../execution/margin_model');
+
 const EVENT_PRIORITY = Object.freeze({
   tick: 10,
   candle: 10,
@@ -31,7 +33,10 @@ class BacktestEngine {
       cash: 0,
       equity: 0,
       margin: 0,
+      maintenanceMargin: 0,
+      unrealizedPnl: 0,
       lastPrice: null,
+      markPrice: null,
       position: {
         qty: 0,
         avgPrice: 0,
@@ -45,6 +50,7 @@ class BacktestEngine {
     this._equitySeries = [];
     this._orders = new Map();
     this._currentConfig = null;
+    this._nextFundingTimestamp = null;
   }
 
   setAdapter(adapter) {
@@ -171,6 +177,7 @@ class BacktestEngine {
 
   handleMarketEvent(event) {
     this.state.lastPrice = event.price ?? event.close ?? this.state.lastPrice;
+    this.state.markPrice = event.mark_price ?? event.markPrice ?? this.state.markPrice ?? this.state.lastPrice;
 
     const strategyEvents = toArray(
       this._strategy.onEvent(event, this.createContext(event.timestamp)),
@@ -181,6 +188,9 @@ class BacktestEngine {
       this._execution.onMarketEvent(event, this.createContext(event.timestamp)),
     );
     this.enqueueEvents(executionEvents);
+
+    this.queueFundingEventsUntil(event.timestamp);
+    this.queueRiskEvents(event.timestamp, { trigger: 'market' });
   }
 
   handleSignal(event) {
@@ -234,6 +244,8 @@ class BacktestEngine {
       cash_after: this.state.cash,
       position_after: { ...this.state.position },
     });
+
+    this.queueRiskEvents(event.timestamp, { trigger: 'fill' });
   }
 
   handleOrderCancelled(event) {
@@ -254,15 +266,26 @@ class BacktestEngine {
       timestamp: event.timestamp,
       type: event.type,
       amount: event.amount,
+      funding_rate: event.funding_rate,
+      interval_multiplier: event.interval_multiplier,
     });
+
+    this.queueRiskEvents(event.timestamp, { trigger: 'funding' });
   }
 
   handleMarginUpdate(event) {
-    this.state.margin = event.margin ?? event.amount ?? this.state.margin;
+    this.state.margin = event.initial_margin ?? event.margin ?? event.amount ?? this.state.margin;
+    this.state.maintenanceMargin = event.maintenance_margin ?? this.state.maintenanceMargin;
+    this.state.unrealizedPnl = event.unrealized_pnl ?? this.state.unrealizedPnl;
     this._tradeLogs.push({
       timestamp: event.timestamp,
       type: event.type,
       margin: this.state.margin,
+      initial_margin: this.state.margin,
+      maintenance_margin: this.state.maintenanceMargin,
+      unrealized_pnl: this.state.unrealizedPnl,
+      mark_price: event.mark_price,
+      trigger: event.trigger,
     });
   }
 
@@ -282,26 +305,109 @@ class BacktestEngine {
       });
     }
 
+    if (event.penalty) {
+      this.state.cash -= Math.abs(event.penalty);
+    }
+
     this._tradeLogs.push({
       timestamp: event.timestamp,
       type: event.type,
       reason: event.reason,
+      penalty: event.penalty ?? 0,
     });
   }
 
   updateEquity(timestamp) {
-    const markPrice = this.state.lastPrice ?? this.state.position.avgPrice;
-    const unrealizedPnl = this.state.position.qty * (markPrice - this.state.position.avgPrice);
+    const markPrice = this.getRiskPrice();
+    const unrealizedPnl = calculateUnrealizedPnl(this.state.position, markPrice);
     this.state.equity = this.state.cash + unrealizedPnl;
+    this.state.unrealizedPnl = unrealizedPnl;
 
     this._equitySeries.push({
       timestamp,
       equity: this.state.equity,
       cash: this.state.cash,
       margin: this.state.margin,
+      maintenance_margin: this.state.maintenanceMargin,
       position_qty: this.state.position.qty,
       position_avg_price: this.state.position.avgPrice,
+      last_price: this.state.lastPrice,
+      mark_price: markPrice,
     });
+  }
+
+  queueFundingEventsUntil(timestamp) {
+    const cfg = this._currentConfig ?? {};
+    const fundingRate = Number(cfg.funding_rate) || 0;
+    const intervalMs = Number(cfg.funding_interval_ms) || 0;
+
+    if (fundingRate === 0 || intervalMs <= 0 || this.state.position.qty === 0) {
+      return;
+    }
+
+    if (this._nextFundingTimestamp == null) {
+      this._nextFundingTimestamp = timestamp + intervalMs;
+      return;
+    }
+
+    while (this._nextFundingTimestamp <= timestamp) {
+      const markPrice = this.getRiskPrice();
+      const notional = Math.abs(this.state.position.qty) * Math.abs(markPrice);
+      const amount = -notional * fundingRate;
+      this.enqueueEvents([{ 
+        type: 'funding_payment',
+        timestamp: this._nextFundingTimestamp,
+        amount,
+        funding_rate: fundingRate,
+        interval_multiplier: 1,
+        position_notional: notional,
+      }]);
+      this._nextFundingTimestamp += intervalMs;
+    }
+  }
+
+  queueRiskEvents(timestamp, { trigger } = {}) {
+    const cfg = this._currentConfig ?? {};
+    if (!isMarginMarket(cfg.market_type)) {
+      return;
+    }
+
+    const snapshot = calculateMarginSnapshot({
+      position: this.state.position,
+      markPrice: this.getRiskPrice(),
+      initialMarginRate: Number(cfg.initial_margin_rate) || 0,
+      maintenanceMarginRate: Number(cfg.maintenance_margin_rate) || 0,
+    });
+
+    this.enqueueEvents([{
+      type: 'margin_update',
+      timestamp,
+      initial_margin: snapshot.initialMargin,
+      maintenance_margin: snapshot.maintenanceMargin,
+      unrealized_pnl: snapshot.unrealizedPnl,
+      mark_price: snapshot.markPrice,
+      trigger,
+    }]);
+
+    const projectedEquity = this.state.cash + snapshot.unrealizedPnl;
+    if (Math.abs(this.state.position.qty) > 0 && projectedEquity < snapshot.maintenanceMargin) {
+      const penaltyRate = Math.max(0, Number(cfg.liquidation_penalty_rate) || 0);
+      const penalty = snapshot.positionNotional * penaltyRate;
+      this.enqueueEvents([{
+        type: 'liquidated',
+        timestamp,
+        reason: 'maintenance_margin_breach',
+        price: snapshot.markPrice,
+        penalty,
+      }]);
+    }
+  }
+
+  getRiskPrice() {
+    if (isMarginMarket(this._currentConfig?.market_type)) {
+      return this.state.markPrice ?? this.state.lastPrice ?? this.state.position.avgPrice;
+    }
+    return this.state.lastPrice ?? this.state.position.avgPrice;
   }
 
   createContext(timestamp) {
@@ -309,6 +415,7 @@ class BacktestEngine {
       state: this.state,
       config: this._currentConfig,
       timestamp,
+      markPrice: this.getRiskPrice(),
       random: () => this._rng(),
       queueEvent: (event) => this.enqueueEvents([event]),
     };
@@ -412,6 +519,10 @@ function toArray(value) {
     return [];
   }
   return Array.isArray(value) ? value : [value];
+}
+
+function isMarginMarket(marketType) {
+  return marketType === 'futures' || marketType === 'perpetual';
 }
 
 function createSeededRng(seed) {
